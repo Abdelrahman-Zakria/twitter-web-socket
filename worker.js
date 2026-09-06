@@ -20,7 +20,7 @@ async function classifyTweetWithAI(tweetText) {
   const prompt = `Classify the following Arabic news tweet into one of these exact categories: [سياسة, اقتصاد, مجتمع, تكنولوجيا, رياضة, عاجل]. Return ONLY the category name in Arabic without any extra text or punctuation:\n\n"${tweetText}"`;
 
   try {
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`, {
+    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${apiKey}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
@@ -97,6 +97,9 @@ function connectWebSocket() {
           } else if (username === 'spl') {
             targetCollection = 'spl';
             notificationTopic = 'spl_topic';
+          } else if (username === 'utechcom') {
+            targetCollection = 'technology';
+            notificationTopic = 'technology_topic';
           } else {
             console.log(`ℹ️ Ignored tweet from unmonitored username: @${username}`);
             continue;
@@ -117,6 +120,8 @@ function connectWebSocket() {
             aiCategory = 'وظائف';
           } else if (username === 'spl') {
             aiCategory = 'رياضة';
+          } else if (username === 'utechcom') {
+            aiCategory = 'تكنولوجيا';
           }
 
           await docRef.set({
