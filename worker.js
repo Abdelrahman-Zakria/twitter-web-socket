@@ -84,10 +84,10 @@ function connectWebSocket() {
           let targetCollection = '';
           let notificationTopic = '';
 
-          if (username === 'saudinews50') {
+          if (username === 'saudinews50' || username === 'ajlnews' || username === 'makanspace') {
             targetCollection = 'news';
             notificationTopic = 'news_topic';
-          } else if (username === 'btalah') {
+          } else if (username === 'newsjobs50') {
             targetCollection = 'jobs';
             notificationTopic = 'jobs_topic';
           } else if (username === 'spl') {
@@ -107,9 +107,9 @@ function connectWebSocket() {
 
           // Logic-based classification
           let aiCategory = 'عام';
-          if (username === 'saudinews50') {
+          if (username === 'saudinews50' || username === 'ajlnews' || username === 'makanspace') {
             aiCategory = await classifyTweetWithAI(text);
-          } else if (username === 'btalah') {
+          } else if (username === 'newsjobs50') {
             aiCategory = 'وظائف';
           } else if (username === 'spl') {
             aiCategory = 'رياضة';
