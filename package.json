@@ -1,7 +1,7 @@
 {
   "name": "twitter-web-socket",
   "version": "1.0.0",
-  "description": "",
+  "description": "Saudi News automated stream and notification worker",
   "main": "worker.js",
   "scripts": {
     "start": "node worker.js"
@@ -10,6 +10,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@google/generative-ai": "^0.21.0",
     "dotenv": "^17.4.2",
     "firebase-admin": "^14.3.0",
     "node-fetch": "^3.3.2",
