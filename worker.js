@@ -138,12 +138,12 @@ function connectWebSocket() {
               title: `[${aiCategory}] خبر جديد 🚨`,
               body: text.substring(0, 150).trim() + '...'
             },
-            data: {
-              tweetId: tweetId,
-              collection: targetCollection, 
-              type: 'news_update'
-              // click_action REMOVED
-            },
+          data: {
+          tweetId: tweetId,
+          collection: targetCollection, 
+          type: 'news_update',
+          click_action: 'FLUTTER_NOTIFICATION_CLICK' 
+        },
             android: {
               priority: 'high',
               notification: {
