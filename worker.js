@@ -15,7 +15,7 @@ const messaging = getMessaging(app);
 
 // 2. Initialize Gemini AI
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const aiModel = genAI.getGenerativeModel({ model: "gemini-3.8-flash" });
+const aiModel = genAI.getGenerativeModel({ model: "gemini-3.5-flash" });
 
 /**
  * Classifies tweet text using Gemini 1.5 Flash
@@ -138,12 +138,12 @@ function connectWebSocket() {
               title: `[${aiCategory}] خبر جديد 🚨`,
               body: text.substring(0, 150).trim() + '...'
             },
-            data: {
-              tweetId: tweetId,
-              collection: targetCollection, 
-              type: 'news_update'
-              // click_action REMOVED
-            },
+          data: {
+          tweetId: tweetId,
+          collection: targetCollection, 
+          type: 'news_update',
+          click_action: 'FLUTTER_NOTIFICATION_CLICK' 
+        },
             android: {
               priority: 'high',
               notification: {
