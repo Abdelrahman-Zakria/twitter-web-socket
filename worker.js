@@ -13,7 +13,7 @@ const app = initializeApp({
 const db = getFirestore(app);
 const messaging = getMessaging(app);
 
-// 2. Initialize Gemini AI (using the latest SDK)
+// 2. Initialize Gemini AI
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const aiModel = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
@@ -28,7 +28,6 @@ async function classifyTweetWithAI(tweetText) {
     const response = await result.response;
     const category = response.text().trim();
     
-    // Validate that AI returned one of the expected categories
     const validCategories = ['سياسة', 'اقتصاد', 'مجتمع', 'تكنولوجيا', 'رياضة', 'عاجل'];
     return validCategories.includes(category) ? category : 'عام';
   } catch (error) {
@@ -38,7 +37,7 @@ async function classifyTweetWithAI(tweetText) {
 }
 
 /**
- * Establishes and maintains the Twitter WebSocket stream
+ * Twitter WebSocket Stream logic
  */
 function connectWebSocket() {
   const apiKey = process.env.TWITTER_API_KEY;
@@ -51,137 +50,135 @@ function connectWebSocket() {
   });
 
   ws.on('open', () => {
-    console.log('🟢 SUCCESS: Connected to Twitter WebSocket Stream live!');
+    console.log('🟢 SUCCESS: Connected to live Twitter stream!');
   });
 
   ws.on('message', async (data) => {
     try {
       const result_json = JSON.parse(data.toString());
       
-      if (result_json.event_type === "connected") return;
-      if (result_json.event_type === "ping") return;
+      if (result_json.event_type !== "tweet") return;
 
-      if (result_json.event_type === "tweet") {
-        const tweets = result_json.tweets || [];
-        console.log(`📥 Received ${tweets.length} tweet(s).`);
+      const tweets = result_json.tweets || [];
+      console.log(`📥 Processing ${tweets.length} tweet(s)...`);
 
-        for (const tweet of tweets) {
-          // Extract basic info
-          const rawAuthor = tweet?.author || {};
-          const rawUsername = rawAuthor.userName || rawAuthor.username || tweet?.username || '';
-          const username = typeof rawUsername === 'string' ? rawUsername.toLowerCase() : '';
-          
-          const text = tweet?.text || '';
-          const tweetId = String(tweet?.id || tweet?.tweet_id || '');
-          const createdAt = tweet?.createdAt || tweet?.created_at || new Date().toISOString();
-          
-          const rawMedia = tweet?.extendedEntities?.media || tweet?.extended_entities?.media || tweet?.media || [];
-          const mediaList = Array.isArray(rawMedia) ? rawMedia : [rawMedia].filter(Boolean);
+      for (const tweet of tweets) {
+        const rawAuthor = tweet?.author || {};
+        const rawUsername = rawAuthor.userName || rawAuthor.username || tweet?.username || '';
+        const username = typeof rawUsername === 'string' ? rawUsername.toLowerCase() : '';
+        
+        const text = tweet?.text || '';
+        const tweetId = String(tweet?.id || tweet?.tweet_id || '');
+        const createdAt = tweet?.createdAt || tweet?.created_at || new Date().toISOString();
+        const mediaList = Array.isArray(tweet?.extendedEntities?.media || tweet?.media) ? (tweet?.extendedEntities?.media || tweet?.media) : [];
 
-          if (!tweetId) continue;
+        if (!tweetId) continue;
 
-          // Route to correct collection and notification topic
-          let targetCollection = '';
-          let notificationTopic = '';
+        // Routing Logic
+        let targetCollection = '';
+        let notificationTopic = '';
 
-          if (username === 'saudinews50' || username === 'ajlnews' || username === 'makanspace') {
-            targetCollection = 'news';
-            notificationTopic = 'news_topic';
-          } else if (username === 'newsjobs50') {
-            targetCollection = 'jobs';
-            notificationTopic = 'jobs_topic';
-          } else if (username === 'spl') {
-            targetCollection = 'spl';
-            notificationTopic = 'spl_topic';
-          } else if (username === 'utechcom') {
-            targetCollection = 'technology';
-            notificationTopic = 'technology_topic';
-          } else {
-            continue;
-          }
+        if (['saudinews50', 'ajlnews', 'makanspace'].includes(username)) {
+          targetCollection = 'news';
+          notificationTopic = 'news_topic';
+        } else if (username === 'newsjobs50') {
+          targetCollection = 'jobs';
+          notificationTopic = 'jobs_topic';
+        } else if (username === 'spl') {
+          targetCollection = 'spl';
+          notificationTopic = 'spl_topic';
+        } else if (username === 'utechcom') {
+          targetCollection = 'technology';
+          notificationTopic = 'technology_topic';
+        } else {
+          continue; // Ignore other users
+        }
 
-          // Deduplication Check
-          const docRef = db.collection(targetCollection).doc(tweetId);
-          const docSnap = await docRef.get();
-          if (docSnap.exists) continue;
+        // Deduplication Check
+        const docRef = db.collection(targetCollection).doc(tweetId);
+        const docSnap = await docRef.get();
+        if (docSnap.exists) {
+          console.log(`🛡️ Duplicate skipped: ${tweetId}`);
+          continue;
+        }
 
-          // Logic-based classification
-          let aiCategory = 'عام';
-          if (username === 'saudinews50' || username === 'ajlnews' || username === 'makanspace') {
-            aiCategory = await classifyTweetWithAI(text);
-          } else if (username === 'newsjobs50') {
-            aiCategory = 'وظائف';
-          } else if (username === 'spl') {
-            aiCategory = 'رياضة';
-          } else if (username === 'utechcom') {
-            aiCategory = 'تكنولوجيا';
-          }
+        // AI Classification
+        let aiCategory = 'عام';
+        if (targetCollection === 'news') {
+          aiCategory = await classifyTweetWithAI(text);
+        } else if (targetCollection === 'jobs') {
+          aiCategory = 'وظائف';
+        } else if (targetCollection === 'spl') {
+          aiCategory = 'رياضة';
+        } else if (targetCollection === 'technology') {
+          aiCategory = 'تكنولوجيا';
+        }
 
-          // 3. Save to Firestore
-          await docRef.set({
-            tweetId,
-            text,
-            createdAt,
-            author: username,
-            category: aiCategory,
-            media: mediaList,
-            retweetCount: tweet?.retweetCount || tweet?.retweet_count || 0,
-            likeCount: tweet?.likeCount || tweet?.like_count || 0,
-            replyCount: tweet?.replyCount || tweet?.reply_count || 0,
-            timestamp: FieldValue.serverTimestamp()
-          });
+        // 3. Save to Firestore
+        await docRef.set({
+          tweetId,
+          text,
+          createdAt,
+          author: username,
+          category: aiCategory,
+          media: mediaList,
+          retweetCount: tweet?.retweetCount || 0,
+          likeCount: tweet?.likeCount || 0,
+          replyCount: tweet?.replyCount || 0,
+          timestamp: FieldValue.serverTimestamp()
+        });
 
-          console.log(`💾 Saved to [${targetCollection}]: @${username}`);
+        console.log(`💾 Saved [${targetCollection}]: @${username}`);
 
-          // 4. Send Professional Notification
-          try {
-            const response = await messaging.send({
-              topic: notificationTopic,
+        // 4. Send Professional Deep-Linking Notification
+        try {
+          const response = await messaging.send({
+            topic: notificationTopic,
+            notification: {
+              title: `[${aiCategory}] خبر جديد 🚨`,
+              body: text.substring(0, 150).trim() + '...'
+            },
+            data: {
+              tweetId: tweetId,
+              collection: targetCollection, // CRITICAL: Allows instant deep linking in the app
+              type: 'news_update',
+              click_action: 'FLUTTER_NOTIFICATION_CLICK'
+            },
+            android: {
+              priority: 'high',
               notification: {
-                title: `[${aiCategory}] خبر جديد 🚨`,
-                body: text.substring(0, 150).trim() + '...'
-              },
-              data: {
-                tweetId: tweetId,
-                type: 'news_update',
-                click_action: 'FLUTTER_NOTIFICATION_CLICK'
-              },
-              android: {
-                priority: 'high',
-                notification: {
-                  channelId: 'fcm_foreground_channel',
+                channelId: 'fcm_foreground_channel',
+                sound: 'default',
+                clickAction: 'FLUTTER_NOTIFICATION_CLICK'
+              }
+            },
+            apns: {
+              payload: {
+                aps: {
                   sound: 'default',
-                  clickAction: 'FLUTTER_NOTIFICATION_CLICK'
-                }
-              },
-              apns: {
-                payload: {
-                  aps: {
-                    sound: 'default',
-                    badge: 1,
-                    contentAvailable: true
-                  }
+                  badge: 1,
+                  contentAvailable: true
                 }
               }
-            });
-            console.log(`🚀 FCM SUCCESS: Sent to [${notificationTopic}]. ID: ${response}`);
-          } catch (fcmError) {
-            console.error(`🔴 FCM FAILED for [${notificationTopic}]:`, fcmError.message);
-          }
+            }
+          });
+          console.log(`🚀 FCM SUCCESS: Sent to [${notificationTopic}]. ID: ${response}`);
+        } catch (fcmError) {
+          console.error(`🔴 FCM ERROR for [${notificationTopic}]:`, fcmError.message);
         }
       }
     } catch (err) {
-      console.error('❌ Processing Error:', err.message);
+      console.error('❌ WebSocket Message Error:', err.message);
     }
   });
 
   ws.on('close', (code, reason) => {
-    console.warn(`⚠️ Connection Lost. Reconnecting in 5s...`);
+    console.warn(`⚠️ WebSocket Disconnected. Reconnecting in 5s...`);
     setTimeout(connectWebSocket, 5000);
   });
 
   ws.on('error', (error) => {
-    console.error('🔴 WebSocket Error:', error.message);
+    console.error('🔴 WebSocket critical error:', error.message);
     ws.terminate();
   });
 }
