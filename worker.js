@@ -15,7 +15,7 @@ const messaging = getMessaging(app);
 
 // 2. Initialize Gemini AI
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const aiModel = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+const aiModel = genAI.getGenerativeModel({ model: "gemini-3.8-flash" });
 
 /**
  * Classifies tweet text using Gemini 1.5 Flash
@@ -91,7 +91,7 @@ function connectWebSocket() {
           targetCollection = 'technology';
           notificationTopic = 'technology_topic';
         } else {
-          continue; // Ignore other users
+          continue; 
         }
 
         // Deduplication Check
@@ -130,7 +130,7 @@ function connectWebSocket() {
 
         console.log(`💾 Saved [${targetCollection}]: @${username}`);
 
-        // 4. Send Professional Deep-Linking Notification
+        // 4. Send Deep-Linking Notification (Optimized for App Opening)
         try {
           const response = await messaging.send({
             topic: notificationTopic,
@@ -140,16 +140,16 @@ function connectWebSocket() {
             },
             data: {
               tweetId: tweetId,
-              collection: targetCollection, // CRITICAL: Allows instant deep linking in the app
-              type: 'news_update',
-              click_action: 'FLUTTER_NOTIFICATION_CLICK'
+              collection: targetCollection, 
+              type: 'news_update'
+              // click_action REMOVED
             },
             android: {
               priority: 'high',
               notification: {
                 channelId: 'fcm_foreground_channel',
-                sound: 'default',
-                clickAction: 'FLUTTER_NOTIFICATION_CLICK'
+                sound: 'default'
+                // clickAction REMOVED
               }
             },
             apns: {
