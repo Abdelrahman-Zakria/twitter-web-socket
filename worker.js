@@ -15,7 +15,7 @@ const messaging = getMessaging(app);
 
 // 2. Initialize Gemini AI
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const aiModel = genAI.getGenerativeModel({ model: "gemini-3.8-flash" });
+const aiModel = genAI.getGenerativeModel({ model: "gemini-3.5-flash" });
 
 /**
  * Classifies tweet text using Gemini 1.5 Flash
