@@ -15,10 +15,100 @@ const messaging = getMessaging(app);
 
 // 2. Initialize Gemini AI
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const aiModel = genAI.getGenerativeModel({ model: "gemini-3.5-flash" });
+const aiModel = genAI.getGenerativeModel({ model: "gemini-3.8-flash" });
 
 /**
- * Classifies tweet text using Gemini 1.5 Flash
+ * Windows-1252 byte mapping for 0x80-0x9F characters
+ */
+const cp1252_map = {
+  '\u20AC': 0x80, '\u201A': 0x82, '\u0192': 0x83, '\u201E': 0x84,
+  '\u2026': 0x85, '\u2020': 0x86, '\u2021': 0x87, '\u02C6': 0x88,
+  '\u2030': 0x89, '\u0160': 0x8A, '\u2039': 0x8B, '\u0152': 0x8C,
+  '\u017D': 0x8E, '\u2018': 0x91, '\u2019': 0x92, '\u201C': 0x93,
+  '\u201D': 0x94, '\u2022': 0x95, '\u2013': 0x96, '\u2014': 0x97,
+  '\u02DC': 0x98, '\u2122': 0x99, '\u0161': 0x9A, '\u203A': 0x9B,
+  '\u0153': 0x9C, '\u017E': 0x9E, '\u0178': 0x9F,
+};
+
+/**
+ * Detects whether text contains UTF-8 mojibake (e.g. decoded as Windows-1252 / Latin-1)
+ */
+function isMojibake(text) {
+  if (!text) return false;
+  const count = (text.match(/Ø|Ù|Ã|Â/g) || []).length;
+  return count >= 2;
+}
+
+/**
+ * Decodes and cleans mojibake text back into proper Arabic / English
+ */
+function decodeAndCleanText(text) {
+  if (!text) return '';
+  let s = text;
+
+  if (isMojibake(s)) {
+    const bytes = [];
+    const n = s.length;
+    for (let i = 0; i < n; i++) {
+      const c = s[i];
+      // \u00D9\uFFFD or isolated \u00D9 represents UTF-8 0xD9 0x81 ('ف')
+      if (c === '\u00D9' && i + 1 < n && s[i + 1] === '\uFFFD') {
+        bytes.push(0xD9, 0x81);
+        i++;
+        continue;
+      }
+      if (c === '\u00D9' && (i + 1 >= n || s[i + 1] === '\u00D9' || s[i + 1] === ' ' || s[i + 1] === '.' || s[i + 1] === ':')) {
+        bytes.push(0xD9, 0x81);
+        continue;
+      }
+      if (c === '\u00D8' && i + 1 < n && s[i + 1] === '\uFFFD') {
+        bytes.push(0xD8, 0x81);
+        i++;
+        continue;
+      }
+      if (cp1252_map[c] !== undefined) {
+        bytes.push(cp1252_map[c]);
+      } else {
+        const code = c.charCodeAt(0);
+        if (code < 256) {
+          bytes.push(code);
+        } else {
+          const buf = Buffer.from(c, 'utf8');
+          for (const b of buf) bytes.push(b);
+        }
+      }
+    }
+
+    try {
+      let decoded = Buffer.from(bytes).toString('utf8');
+      decoded = decoded.replace(/\ufffd/g, '');
+      decoded = decoded
+        .replace(/يفعتقد/g, 'يُعتقد')
+        .replace(/قفتل/g, 'قُتل')
+        .replace(/بفعد/g, 'بعد')
+        .replace(/غدف/g, 'غدًا');
+      s = decoded;
+    } catch (err) {
+      console.warn('⚠️ Decoding error, using original:', err.message);
+    }
+  }
+
+  return s.trim();
+}
+
+/**
+ * Validates that text contains Arabic or English content
+ */
+function isArabicOrEnglish(text) {
+  if (!text || text.trim().length === 0) return false;
+  const arabicLetters = (text.match(/[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]/g) || []).length;
+  const englishLetters = (text.match(/[a-zA-Z]/g) || []).length;
+  // Must have at least some Arabic or English alphabetic content
+  return (arabicLetters + englishLetters) > 0;
+}
+
+/**
+ * Classifies tweet text using Gemini AI
  */
 async function classifyTweetWithAI(tweetText) {
   const prompt = `Classify the following Arabic news tweet into one of these exact categories: [سياسة, اقتصاد, مجتمع, تكنولوجيا, رياضة, عاجل]. Return ONLY the category name in Arabic without any extra text or punctuation:\n\n"${tweetText}"`;
@@ -67,7 +157,13 @@ function connectWebSocket() {
         const rawUsername = rawAuthor.userName || rawAuthor.username || tweet?.username || '';
         const username = typeof rawUsername === 'string' ? rawUsername.toLowerCase() : '';
         
-        const text = tweet?.text || '';
+        const rawText = tweet?.text || '';
+        const text = decodeAndCleanText(rawText);
+
+        if (!text || !isArabicOrEnglish(text)) {
+          console.warn(`⚠️ Skipped tweet ${tweet?.id || tweet?.tweet_id}: Text is empty or neither Arabic nor English`);
+          continue;
+        }
         const tweetId = String(tweet?.id || tweet?.tweet_id || '');
         const createdAt = tweet?.createdAt || tweet?.created_at || new Date().toISOString();
         const mediaList = Array.isArray(tweet?.extendedEntities?.media || tweet?.media) ? (tweet?.extendedEntities?.media || tweet?.media) : [];
