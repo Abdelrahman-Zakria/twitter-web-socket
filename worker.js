@@ -5,6 +5,14 @@ const { getFirestore, FieldValue } = require('firebase-admin/firestore');
 const { getMessaging } = require('firebase-admin/messaging');
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 
+// Prevent silent process death
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('⚠️ Unhandled Rejection at:', promise, 'reason:', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('⚠️ Uncaught Exception:', err);
+});
+
 // 1. Initialize Firebase Admin
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
 const app = initializeApp({
@@ -13,9 +21,9 @@ const app = initializeApp({
 const db = getFirestore(app);
 const messaging = getMessaging(app);
 
-// 2. Initialize Gemini AI
+// 2. Initialize Gemini AI (using recommended fast model)
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const aiModel = genAI.getGenerativeModel({ model: "gemini-3.8-flash" });
+const aiModel = genAI.getGenerativeModel({ model: "gemini-3.5-flash-lite" });
 
 /**
  * Windows-1252 byte mapping for 0x80-0x9F characters
@@ -51,7 +59,6 @@ function decodeAndCleanText(text) {
     const n = s.length;
     for (let i = 0; i < n; i++) {
       const c = s[i];
-      // \u00D9\uFFFD or isolated \u00D9 represents UTF-8 0xD9 0x81 ('ف')
       if (c === '\u00D9' && i + 1 < n && s[i + 1] === '\uFFFD') {
         bytes.push(0xD9, 0x81);
         i++;
@@ -103,32 +110,203 @@ function isArabicOrEnglish(text) {
   if (!text || text.trim().length === 0) return false;
   const arabicLetters = (text.match(/[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]/g) || []).length;
   const englishLetters = (text.match(/[a-zA-Z]/g) || []).length;
-  // Must have at least some Arabic or English alphabetic content
   return (arabicLetters + englishLetters) > 0;
 }
 
 /**
- * Classifies tweet text using Gemini AI
+ * Fast keyword classification to avoid slow AI roundtrips when obvious
+ */
+function classifyFastWithKeywords(text) {
+  const t = text.toLowerCase();
+  if (t.includes('عاجل')) return 'عاجل';
+  if (/دوري|مباراة|كأس|نادي|لاعب|منتخب|رياضي|أهداف|كرة|الهلال|النصر|الاتحاد|الأهلي/.test(t)) return 'رياضة';
+  if (/اقتصاد|أسهم|تداول|تضخم|ريال|دولار|نفط|برميل|بنك|مصرف|أرباح|ميزانية|استثمار/.test(t)) return 'اقتصاد';
+  if (/وزير|وزارة الخارجية|مجلس الوزراء|قمة|دبلوماسي|حرب|جيش|عسكري|دفاع|هدنة|اتفاقية|ترامب|بايدن|طهران|إيران/.test(t)) return 'سياسة';
+  if (/تقنية|ذكاء اصطناعي|تطبيق|هاتف|إنترنت|أبل|سامسونج|تحديث|أندرويد|ios/.test(t)) return 'تكنولوجيا';
+  if (/وظيفة|وظائف|شاغرة|توظيف|رواتب|تدريب/.test(t)) return 'وظائف';
+  if (/طقس|أمطار|صحة|تعليم|مدرسة|جامعة|طرق|مرور|حوادث/.test(t)) return 'مجتمع';
+  return null;
+}
+
+/**
+ * Classifies tweet text using Gemini AI with strict timeout
  */
 async function classifyTweetWithAI(tweetText) {
+  const quick = classifyFastWithKeywords(tweetText);
+  if (quick) return quick;
+
   const prompt = `Classify the following Arabic news tweet into one of these exact categories: [سياسة, اقتصاد, مجتمع, تكنولوجيا, رياضة, عاجل]. Return ONLY the category name in Arabic without any extra text or punctuation:\n\n"${tweetText}"`;
 
   try {
-    const result = await aiModel.generateContent(prompt);
-    const response = await result.response;
-    const category = response.text().trim();
-    
+    const aiPromise = aiModel.generateContent(prompt).then(async r => {
+      const response = await r.response;
+      return response.text().trim();
+    });
+
+    const timeoutPromise = new Promise((_, reject) => 
+      setTimeout(() => reject(new Error('AI timeout')), 3500)
+    );
+
+    const category = await Promise.race([aiPromise, timeoutPromise]);
     const validCategories = ['سياسة', 'اقتصاد', 'مجتمع', 'تكنولوجيا', 'رياضة', 'عاجل'];
     return validCategories.includes(category) ? category : 'عام';
   } catch (error) {
-    console.error('⚠️ AI Classification Error:', error.message);
     return 'عام';
   }
 }
 
 /**
- * Twitter WebSocket Stream logic
+ * Common tweet processing logic
  */
+async function processSingleTweet(tweet, isLive = true) {
+  const rawAuthor = tweet?.author || {};
+  const rawUsername = rawAuthor.userName || rawAuthor.username || tweet?.username || '';
+  const username = typeof rawUsername === 'string' ? rawUsername.toLowerCase() : '';
+
+  const rawText = tweet?.text || '';
+  const text = decodeAndCleanText(rawText);
+
+  if (!text || !isArabicOrEnglish(text)) {
+    return false;
+  }
+  const tweetId = String(tweet?.id || tweet?.tweet_id || '');
+  const createdAt = tweet?.createdAt || tweet?.created_at || new Date().toISOString();
+  const mediaList = Array.isArray(tweet?.extendedEntities?.media || tweet?.media) 
+    ? (tweet?.extendedEntities?.media || tweet?.media) 
+    : [];
+
+  if (!tweetId) return false;
+
+  // Routing Logic
+  let targetCollection = '';
+  let notificationTopic = '';
+
+  if (['saudinews50', 'ajlnews', 'makanspace'].includes(username)) {
+    targetCollection = 'news';
+    notificationTopic = 'news_topic';
+  } else if (username === 'newsjobs50') {
+    targetCollection = 'jobs';
+    notificationTopic = 'jobs_topic';
+  } else if (username === 'spl') {
+    targetCollection = 'spl';
+    notificationTopic = 'spl_topic';
+  } else if (username === 'utechcom') {
+    targetCollection = 'technology';
+    notificationTopic = 'technology_topic';
+  } else {
+    return false;
+  }
+
+  // Deduplication Check
+  const docRef = db.collection(targetCollection).doc(tweetId);
+  const docSnap = await docRef.get();
+  if (docSnap.exists) {
+    return false;
+  }
+
+  // AI Classification
+  let aiCategory = 'عام';
+  if (targetCollection === 'news') {
+    aiCategory = await classifyTweetWithAI(text);
+  } else if (targetCollection === 'jobs') {
+    aiCategory = 'وظائف';
+  } else if (targetCollection === 'spl') {
+    aiCategory = 'رياضة';
+  } else if (targetCollection === 'technology') {
+    aiCategory = 'تكنولوجيا';
+  }
+
+  // Save to Firestore
+  await docRef.set({
+    tweetId,
+    text,
+    createdAt,
+    author: username,
+    category: aiCategory,
+    media: mediaList,
+    retweetCount: tweet?.retweetCount || 0,
+    likeCount: tweet?.likeCount || 0,
+    replyCount: tweet?.replyCount || 0,
+    timestamp: FieldValue.serverTimestamp()
+  });
+
+  console.log(`💾 Saved [${targetCollection}] (${aiCategory}): @${username} - ${text.substring(0, 45)}...`);
+
+  // Send Deep-Linking Notification only for live incoming tweets
+  if (isLive) {
+    try {
+      const response = await messaging.send({
+        topic: notificationTopic,
+        notification: {
+          title: `[${aiCategory}] خبر جديد 🚨`,
+          body: text.substring(0, 150).trim() + '...'
+        },
+        data: {
+          tweetId: tweetId,
+          collection: targetCollection, 
+          type: 'news_update',
+          click_action: 'FLUTTER_NOTIFICATION_CLICK' 
+        },
+        android: {
+          priority: 'high',
+          notification: {
+            channelId: 'fcm_foreground_channel',
+            sound: 'default'
+          }
+        },
+        apns: {
+          payload: {
+            aps: {
+              sound: 'default',
+              badge: 1,
+              contentAvailable: true
+            }
+          }
+        }
+      });
+      console.log(`🚀 FCM SUCCESS: Sent to [${notificationTopic}]. ID: ${response}`);
+    } catch (fcmError) {
+      console.error(`🔴 FCM ERROR for [${notificationTopic}]:`, fcmError.message);
+    }
+  }
+
+  return true;
+}
+
+/**
+ * Background auto-backfill on startup and after reconnection
+ */
+async function backfillRecentTweets() {
+  console.log('🔄 Checking for any missed tweets during downtime...');
+  const fetch = (...args) => import('node-fetch').then(({default: f}) => f(...args));
+  const accounts = ['SaudiNews50', 'ajlnews', 'newsjobs50', 'spl', 'utechcom'];
+
+  for (const account of accounts) {
+    try {
+      const url = `https://api.twitterapi.io/twitter/user/last_tweets?userName=${account}`;
+      const res = await fetch(url, {
+        headers: { 'x-api-key': process.env.TWITTER_API_KEY }
+      });
+      if (!res.ok) continue;
+
+      const data = await res.json();
+      const tweets = data.data?.tweets || data.tweets || [];
+      for (const tweet of tweets) {
+        await processSingleTweet(tweet, false);
+      }
+    } catch (e) {
+      console.warn(`⚠️ Backfill error for @${account}:`, e.message);
+    }
+  }
+  console.log('✅ Backfill check complete.');
+}
+
+/**
+ * Twitter WebSocket Stream logic with Heartbeat & Dead Socket Detection
+ */
+let reconnectDelay = 3000;
+let isBackfillRunning = false;
+
 function connectWebSocket() {
   const apiKey = process.env.TWITTER_API_KEY;
   const wsUrl = "wss://ws.twitterapi.io/twitter/tweet/websocket";
@@ -139,129 +317,53 @@ function connectWebSocket() {
     headers: { "x-api-key": apiKey }
   });
 
+  let heartbeatInterval = null;
+  let isAlive = false;
+
   ws.on('open', () => {
     console.log('🟢 SUCCESS: Connected to live Twitter stream!');
+    reconnectDelay = 3000; // Reset backoff on success
+    isAlive = true;
+
+    // Heartbeat every 25 seconds to keep connection alive and detect half-open sockets
+    heartbeatInterval = setInterval(() => {
+      if (!isAlive) {
+        console.warn('⚠️ No heartbeat response in 25s. Dead socket detected, terminating...');
+        clearInterval(heartbeatInterval);
+        return ws.terminate(); // Triggers 'close' event and forces reconnection
+      }
+      isAlive = false;
+      try {
+        ws.ping();
+      } catch (err) {
+        ws.terminate();
+      }
+    }, 25000);
+
+    // Run backfill in background once connected
+    if (!isBackfillRunning) {
+      isBackfillRunning = true;
+      backfillRecentTweets().finally(() => {
+        isBackfillRunning = false;
+      });
+    }
+  });
+
+  ws.on('pong', () => {
+    isAlive = true;
   });
 
   ws.on('message', async (data) => {
+    isAlive = true; // Any message proves socket is active
     try {
       const result_json = JSON.parse(data.toString());
-      
       if (result_json.event_type !== "tweet") return;
 
       const tweets = result_json.tweets || [];
       console.log(`📥 Processing ${tweets.length} tweet(s)...`);
 
       for (const tweet of tweets) {
-        const rawAuthor = tweet?.author || {};
-        const rawUsername = rawAuthor.userName || rawAuthor.username || tweet?.username || '';
-        const username = typeof rawUsername === 'string' ? rawUsername.toLowerCase() : '';
-        
-        const rawText = tweet?.text || '';
-        const text = decodeAndCleanText(rawText);
-
-        if (!text || !isArabicOrEnglish(text)) {
-          console.warn(`⚠️ Skipped tweet ${tweet?.id || tweet?.tweet_id}: Text is empty or neither Arabic nor English`);
-          continue;
-        }
-        const tweetId = String(tweet?.id || tweet?.tweet_id || '');
-        const createdAt = tweet?.createdAt || tweet?.created_at || new Date().toISOString();
-        const mediaList = Array.isArray(tweet?.extendedEntities?.media || tweet?.media) ? (tweet?.extendedEntities?.media || tweet?.media) : [];
-
-        if (!tweetId) continue;
-
-        // Routing Logic
-        let targetCollection = '';
-        let notificationTopic = '';
-
-        if (['saudinews50', 'ajlnews', 'makanspace'].includes(username)) {
-          targetCollection = 'news';
-          notificationTopic = 'news_topic';
-        } else if (username === 'newsjobs50') {
-          targetCollection = 'jobs';
-          notificationTopic = 'jobs_topic';
-        } else if (username === 'spl') {
-          targetCollection = 'spl';
-          notificationTopic = 'spl_topic';
-        } else if (username === 'utechcom') {
-          targetCollection = 'technology';
-          notificationTopic = 'technology_topic';
-        } else {
-          continue; 
-        }
-
-        // Deduplication Check
-        const docRef = db.collection(targetCollection).doc(tweetId);
-        const docSnap = await docRef.get();
-        if (docSnap.exists) {
-          console.log(`🛡️ Duplicate skipped: ${tweetId}`);
-          continue;
-        }
-
-        // AI Classification
-        let aiCategory = 'عام';
-        if (targetCollection === 'news') {
-          aiCategory = await classifyTweetWithAI(text);
-        } else if (targetCollection === 'jobs') {
-          aiCategory = 'وظائف';
-        } else if (targetCollection === 'spl') {
-          aiCategory = 'رياضة';
-        } else if (targetCollection === 'technology') {
-          aiCategory = 'تكنولوجيا';
-        }
-
-        // 3. Save to Firestore
-        await docRef.set({
-          tweetId,
-          text,
-          createdAt,
-          author: username,
-          category: aiCategory,
-          media: mediaList,
-          retweetCount: tweet?.retweetCount || 0,
-          likeCount: tweet?.likeCount || 0,
-          replyCount: tweet?.replyCount || 0,
-          timestamp: FieldValue.serverTimestamp()
-        });
-
-        console.log(`💾 Saved [${targetCollection}]: @${username}`);
-
-        // 4. Send Deep-Linking Notification (Optimized for App Opening)
-        try {
-          const response = await messaging.send({
-            topic: notificationTopic,
-            notification: {
-              title: `[${aiCategory}] خبر جديد 🚨`,
-              body: text.substring(0, 150).trim() + '...'
-            },
-          data: {
-          tweetId: tweetId,
-          collection: targetCollection, 
-          type: 'news_update',
-          click_action: 'FLUTTER_NOTIFICATION_CLICK' 
-        },
-            android: {
-              priority: 'high',
-              notification: {
-                channelId: 'fcm_foreground_channel',
-                sound: 'default'
-                // clickAction REMOVED
-              }
-            },
-            apns: {
-              payload: {
-                aps: {
-                  sound: 'default',
-                  badge: 1,
-                  contentAvailable: true
-                }
-              }
-            }
-          });
-          console.log(`🚀 FCM SUCCESS: Sent to [${notificationTopic}]. ID: ${response}`);
-        } catch (fcmError) {
-          console.error(`🔴 FCM ERROR for [${notificationTopic}]:`, fcmError.message);
-        }
+        await processSingleTweet(tweet, true);
       }
     } catch (err) {
       console.error('❌ WebSocket Message Error:', err.message);
@@ -269,11 +371,14 @@ function connectWebSocket() {
   });
 
   ws.on('close', (code, reason) => {
-    console.warn(`⚠️ WebSocket Disconnected. Reconnecting in 5s...`);
-    setTimeout(connectWebSocket, 5000);
+    if (heartbeatInterval) clearInterval(heartbeatInterval);
+    console.warn(`⚠️ WebSocket Disconnected (code: ${code}, reason: ${reason}). Reconnecting in ${reconnectDelay / 1000}s...`);
+    setTimeout(connectWebSocket, reconnectDelay);
+    reconnectDelay = Math.min(reconnectDelay * 1.5, 30000); // Exponential backoff up to 30s
   });
 
   ws.on('error', (error) => {
+    if (heartbeatInterval) clearInterval(heartbeatInterval);
     console.error('🔴 WebSocket critical error:', error.message);
     ws.terminate();
   });
