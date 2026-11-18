@@ -384,4 +384,134 @@ function connectWebSocket() {
   });
 }
 
+/**
+ * Real-time listener for notification queue written by Admin Dashboard
+ */
+function initNotificationQueueListener() {
+  console.log('📡 Starting Admin Notification Queue listener...');
+  db.collection('notification_queue')
+    .where('status', '==', 'pending')
+    .onSnapshot(async (snapshot) => {
+      for (const change of snapshot.docChanges()) {
+        if (change.type === 'added') {
+          const doc = change.doc;
+          const data = doc.data();
+          const { title, body, topic, articleId } = data;
+          const targetTopic = topic || 'all_news';
+          console.log(`📢 Dispatching Admin Push Notification: [${targetTopic}] "${title}"`);
+
+          try {
+            const response = await messaging.send({
+              topic: targetTopic,
+              notification: {
+                title: title,
+                body: body,
+              },
+              data: {
+                articleId: articleId || '',
+                type: 'admin_broadcast',
+                click_action: 'FLUTTER_NOTIFICATION_CLICK',
+              },
+              android: {
+                priority: 'high',
+                notification: {
+                  channelId: 'fcm_foreground_channel',
+                  sound: 'default',
+                },
+              },
+              apns: {
+                payload: {
+                  aps: {
+                    sound: 'default',
+                    badge: 1,
+                    contentAvailable: true,
+                  },
+                },
+              },
+            });
+            console.log(`✅ Admin FCM Push SUCCESS to [${targetTopic}]. ID: ${response}`);
+            await doc.ref.update({
+              status: 'sent',
+              fcmMessageId: response,
+              sentAt: FieldValue.serverTimestamp(),
+            });
+          } catch (err) {
+            console.error(`❌ Admin FCM Push ERROR for [${targetTopic}]:`, err.message);
+            await doc.ref.update({
+              status: 'failed',
+              error: err.message,
+              failedAt: FieldValue.serverTimestamp(),
+            });
+          }
+        }
+      }
+    }, (error) => {
+      console.error('⚠️ Notification Queue Listener error:', error.message);
+    });
+}
+
+/**
+ * Lightweight HTTP server for healthchecks & notification webhooks
+ */
+const http = require('http');
+const server = http.createServer(async (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+
+  if (req.method === 'OPTIONS') {
+    res.writeHead(200);
+    return res.end();
+  }
+
+  if (req.url === '/health' || req.url === '/') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ status: 'ok', service: 'saudi-news-worker' }));
+  }
+
+  if (req.method === 'POST' && req.url === '/api/send-notification') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const payload = JSON.parse(body);
+        const { title, body: msgBody, topic, articleId } = payload;
+        const targetTopic = topic || 'all_news';
+        const response = await messaging.send({
+          topic: targetTopic,
+          notification: { title, body: msgBody },
+          data: {
+            articleId: articleId || '',
+            type: 'admin_broadcast',
+            click_action: 'FLUTTER_NOTIFICATION_CLICK'
+          },
+          android: {
+            priority: 'high',
+            notification: { channelId: 'fcm_foreground_channel', sound: 'default' }
+          },
+          apns: {
+            payload: { aps: { sound: 'default', badge: 1, contentAvailable: true } }
+          }
+        });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ success: true, messageId: response }));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ success: false, error: e.message }));
+      }
+    });
+    return;
+  }
+
+  res.writeHead(404);
+  res.end('Not Found');
+});
+
+const PORT = process.env.PORT || 8080;
+server.listen(PORT, () => {
+  console.log(`🌐 HTTP Server listening on port ${PORT}`);
+});
+
+// Start workers
 connectWebSocket();
+initNotificationQueueListener();
