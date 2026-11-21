@@ -234,12 +234,15 @@ async function processSingleTweet(tweet, isLive = true) {
 
   // Send Deep-Linking Notification only for live incoming tweets
   if (isLive) {
+    const notifTitle = `[${aiCategory}] خبر جديد 🚨`;
+    const notifBody = text.substring(0, 150).trim() + '...';
+
     try {
       const response = await messaging.send({
         topic: notificationTopic,
         notification: {
-          title: `[${aiCategory}] خبر جديد 🚨`,
-          body: text.substring(0, 150).trim() + '...'
+          title: notifTitle,
+          body: notifBody
         },
         data: {
           tweetId: tweetId,
@@ -267,6 +270,24 @@ async function processSingleTweet(tweet, isLive = true) {
       console.log(`🚀 FCM SUCCESS: Sent to [${notificationTopic}]. ID: ${response}`);
     } catch (fcmError) {
       console.error(`🔴 FCM ERROR for [${notificationTopic}]:`, fcmError.message);
+    }
+
+    // Also write to `notifications` collection so web users receive it in real-time
+    try {
+      await db.collection('notifications').add({
+        title: notifTitle,
+        body: notifBody,
+        topic: notificationTopic,
+        tweetId: tweetId,
+        articleId: tweetId,
+        collection: targetCollection,
+        timestamp: FieldValue.serverTimestamp(),
+        createdAt: new Date().toISOString(),
+        source: 'twitter_live'
+      });
+      console.log(`📡 Broadcasted live notification to Firestore for web users.`);
+    } catch (nErr) {
+      console.error(`⚠️ Firestore live notification log error:`, nErr.message);
     }
   }
 
